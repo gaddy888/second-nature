@@ -56,6 +56,7 @@
   .ch { color: var(--dim); border-radius: 3px; }
   .ch.done { color: var(--text); }
   .ch.slip { color: var(--warn); }
+  .ch.wrong { color: #fff; background: var(--bad-bg); box-shadow: inset 0 -2px var(--bad); }
   .ch.cur { background: var(--accent); color: #0b1220; }
   .ch.cur.err { background: var(--bad); color: #fff; }
   .ch.ret { color: var(--faint); margin-left: 4px; }
@@ -414,29 +415,57 @@ const ALL = [];
 TRACKS.forEach(tr => tr.lessons.forEach((ls, i) => {
   ls.id = tr.id + '-' + i; ls.track = tr; ALL.push(ls);
 }));
-let cur = null, seq = [], pos = 0, startAt = 0, endAt = 0, slips = new Set(), finished = false, timer = null;
-let wrongs = [];                 // keys hit at this position since the last correct one
+// Free typing, like a text box: every key you hit goes in, right or wrong.
+// typed[i] lines up with seq[i]; caret is where the next key lands.
+let cur = null, seq = [], typed = [], caret = 0, startAt = 0, endAt = 0;
+let slips = new Set(), scored = new Set(), finished = false, timer = null, flash = null;
 
-// The line you are typing, echoed back with every wrong key shown where it landed.
-function renderEcho() {
-  let from = pos;
-  while (from > 0 && seq[from - 1].ch !== '\n') from--;
-  const typed = seq.slice(from, pos).map(s => s.ch).join('');
-  const html = [];
-  if (typed) html.push(`<span class="t">${esc(typed)}</span>`);
-  wrongs.slice(-6).forEach(w => {
-    const long = [...w].length > 1;
-    html.push(`<span class="w${long ? ' long' : ''}">${esc(w === ' ' ? '␣' : w)}</span>`);
+function correctCount() {
+  let n = 0;
+  for (let i = 0; i < Math.min(typed.length, seq.length); i++) if (typed[i] === seq[i].ch) n++;
+  return n;
+}
+function mistakes() { return typed.length - correctCount(); }
+function lineBounds() {
+  let s = caret, e = caret;
+  while (s > 0 && typed[s - 1] !== '\n') s--;
+  while (e < typed.length && typed[e] !== '\n') e++;
+  return [s, e];
+}
+
+// Top box: green for right, red marker on every wrong character, block cursor at the caret.
+function paintTop(err) {
+  seq.forEach((s, i) => {
+    let c = 'ch' + (s.ch === '\n' ? ' ret' : '');
+    if (i < typed.length) c += typed[i] === s.ch ? ' done' + (slips.has(i) ? ' slip' : '') : ' wrong';
+    if (i === caret) c += ' cur' + (err ? ' err' : '');
+    s.el.className = c;
   });
-  html.push('<span class="caret"></span>');
-  if (!typed && !wrongs.length) html.push(' <span class="hint">start typing</span>');
+  if (seq[caret]) seq[caret].el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+// Bottom box: the line the caret is on, exactly as you typed it, wrong keys in red.
+function renderEcho() {
+  const [s, e] = lineBounds();
+  const html = [], caretEl = '<span class="caret"></span>';
+  for (let i = s; i < e; i++) {
+    if (i === caret) html.push(caretEl);
+    const ch = typed[i], bad = i >= seq.length || ch !== seq[i].ch;
+    const shown = ch === ' ' ? '␣' : ch === '\t' ? '⇥' : ch === '\n' ? '⏎' : ch;
+    html.push(bad ? `<span class="w${ch === '\t' ? ' long' : ''}">${esc(shown)}</span>`
+                  : `<span class="t">${esc(ch)}</span>`);
+  }
+  if (caret === e) html.push(caretEl);
+  if (flash) html.push(`<span class="w long">${esc(flash)}</span>`);
+  if (!typed.length && !flash) html.push(' <span class="hint">start typing</span>');
   $('echo-txt').innerHTML = html.join('');
-  $('echo').classList.toggle('miss', wrongs.length > 0);
+  $('echo').classList.toggle('miss', mistakes() > 0 || !!flash);
 }
 
 const isNote = line => /^(#|--)(\s|$)/.test(line.trim());
 function loadLesson(lesson) {
-  cur = lesson; seq = []; pos = 0; startAt = 0; endAt = 0; slips = new Set(); finished = false; wrongs = [];
+  cur = lesson; seq = []; typed = []; caret = 0; startAt = 0; endAt = 0;
+  slips = new Set(); scored = new Set(); finished = false; flash = null;
   clearInterval(timer);
   $('crumb').textContent = lesson.track ? lesson.track.name : 'Practice';
   $('title').textContent = lesson.t;
@@ -467,28 +496,35 @@ function loadLesson(lesson) {
     codeEl.appendChild(div);
   });
   if (lesson.track) { save.last = lesson.id; persist(); }
-  markCursor(); showNext(); renderStats(); renderNav(); renderEcho();
+  paintTop(); showNext(); renderStats(); renderNav(); renderEcho();
 }
-function markCursor() {
-  if (seq[pos]) {
-    seq[pos].el.classList.add('cur');
-    seq[pos].el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }
+function fixNote() {
+  const n = mistakes();
+  return n ? `<div class="hint">${n} wrong character${n > 1 ? 's' : ''} marked red. ` +
+    `Backspace deletes, ← → move the caret, ↑ ↓ change line.</div>` : '';
 }
 function showNext() {
   fbEl.className = 'fb';
-  if (finished || !seq[pos]) { clearKB(); return; }
-  const ch = seq[pos].ch, loc = (CHARMAP[ch] || [])[0];
+  if (finished) { clearKB(); return; }
+  if (!seq[caret]) {
+    clearKB();
+    fbEl.innerHTML = mistakes()
+      ? `<div class="quiet">You are at the end, but the text does not match yet.</div>` + fixNote()
+      : '<div class="quiet">Nothing left to type here.</div>';
+    return;
+  }
+  const ch = seq[caret].ch, loc = (CHARMAP[ch] || [])[0];
   if (!save.guide) {
     clearKB();
-    fbEl.innerHTML = '<div class="quiet">Key guide is off. A wrong key will still show here and on the keyboard.</div>';
+    fbEl.innerHTML = '<div class="quiet">Key guide is off. A wrong key will still show here and on the keyboard.</div>' + fixNote();
     return;
   }
   const alt = altLoc(ch);
   paint(loc, null, alt);
   fbEl.innerHTML = `<div class="fb-row"><span class="fb-lbl">next</span>` +
     `<kbd>${esc(charName(ch))}</kbd><span class="how">${describe(loc)}</span></div>` +
-    (alt ? `<div class="fb-row"><span class="fb-lbl">or</span><span class="how quiet">${describe(alt)}</span></div>` : '');
+    (alt ? `<div class="fb-row"><span class="fb-lbl">or</span><span class="how quiet">${describe(alt)}</span></div>` : '') +
+    fixNote();
 }
 function showMiss(expCh, hitCh, hitLabel, ev) {
   let expLoc = (CHARMAP[expCh] || [])[0];
@@ -509,7 +545,7 @@ function showMiss(expCh, hitCh, hitLabel, ev) {
     `<span class="how">${describe(expLoc)}</span></div>` +
     `<div class="fb-row"><span class="fb-lbl">you hit</span><kbd class="bad">${esc(hitLabel)}</kbd>` +
     `<span class="how">${modFired ? 'with a modifier held' : describe(hitLoc)}</span></div>` +
-    (hint ? `<div class="hint">${esc(hint)}</div>` : '');
+    (hint ? `<div class="hint">${esc(hint)}</div>` : '') + fixNote();
 }
 function record(expCh, hitLabel, ok) {
   const k = save.keys[expCh] = save.keys[expCh] || { h: 0, m: 0 };
@@ -519,9 +555,49 @@ function record(expCh, hitLabel, ok) {
     save.conf[c] = (save.conf[c] || 0) + 1;
   }
 }
+/* ---- travelling in the typed text ---- */
+function wordLeft() {
+  let i = caret;
+  while (i > 0 && /\s/.test(typed[i - 1])) i--;
+  while (i > 0 && !/\s/.test(typed[i - 1])) i--;
+  return i;
+}
+function wordRight() {
+  let i = caret;
+  while (i < typed.length && /\s/.test(typed[i])) i++;
+  while (i < typed.length && !/\s/.test(typed[i])) i++;
+  return i;
+}
+function moveCaret(k, e) {
+  const [s, en] = lineBounds();
+  const word = e.altKey || e.ctrlKey, line = e.metaKey;
+  if (k === 'ArrowLeft') caret = line ? s : word ? wordLeft() : Math.max(0, caret - 1);
+  else if (k === 'ArrowRight') caret = line ? en : word ? wordRight() : Math.min(typed.length, caret + 1);
+  else if (k === 'Home') caret = s;
+  else if (k === 'End') caret = en;
+  else if (k === 'PageUp') caret = 0;
+  else if (k === 'PageDown') caret = typed.length;
+  else if (k === 'ArrowUp') {
+    if (s === 0) caret = 0;
+    else {
+      const pe = s - 1; let ps = pe;
+      while (ps > 0 && typed[ps - 1] !== '\n') ps--;
+      caret = Math.min(ps + (caret - s), pe);
+    }
+  } else if (k === 'ArrowDown') {
+    if (en >= typed.length) caret = typed.length;
+    else {
+      const ns = en + 1; let ne = ns;
+      while (ne < typed.length && typed[ne] !== '\n') ne++;
+      caret = Math.min(ns + (caret - s), ne);
+    }
+  }
+}
+const NAV_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
+
 function onKey(e) {
-  if (e.metaKey) return;
   const k = e.key;
+  if (e.metaKey && !NAV_KEYS.includes(k)) return;       // leave Cmd+R, Cmd+L and friends alone
   if (k === 'Escape') { e.preventDefault(); loadLesson(cur); return; }
   if (finished) {
     if (k === 'Enter') { e.preventDefault(); nextLesson(); }
@@ -529,44 +605,63 @@ function onKey(e) {
     return;
   }
   if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(k)) return;
-  if (k === 'Backspace') { e.preventDefault(); return; }   // nothing to delete: you can't advance past a miss
-  let ch = k === 'Enter' ? '\n' : k === 'Tab' ? '\t' : k.length === 1 ? k : null;
-  const named = NAMED[k], dead = k === 'Dead';
-  if (ch === null && !named && !dead) return;
-  e.preventDefault();
-  if (!seq[pos]) return;
-  if (!startAt) { startAt = performance.now(); timer = setInterval(renderStats, 500); }
-  const exp = seq[pos];
-  const modFired = e.ctrlKey || e.altKey || dead;
-  if (ch === exp.ch && !modFired) {
-    if (!slips.has(pos)) record(exp.ch, '', true);
-    exp.el.classList.remove('cur', 'err');
-    exp.el.classList.add('done');
-    if (slips.has(pos)) exp.el.classList.add('slip');
-    pos++; wrongs = [];
-    renderEcho();
-    if (pos >= seq.length) return finish();
-    markCursor(); showNext(); renderStats();
+
+  if (NAV_KEYS.includes(k) || k === 'Backspace' || k === 'Delete') {
+    e.preventDefault(); flash = null;
+    if (k === 'Backspace') { if (caret > 0) { typed.splice(caret - 1, 1); caret--; } }
+    else if (k === 'Delete') { if (caret < typed.length) typed.splice(caret, 1); }
+    else moveCaret(k, e);
+    paintTop(); renderEcho(); showNext(); renderStats();
     return;
   }
-  const label = named ? NAMED_LABEL[k] : dead ? 'alt+key' : modFired ? (e.ctrlKey ? 'ctrl+' : 'alt+') + charName(ch) : charName(ch);
-  if (!slips.has(pos)) { slips.add(pos); record(exp.ch, label, false); persist(); }
-  exp.el.classList.add('err');
-  wrongs.push(label); renderEcho();
-  showMiss(exp.ch, ch, label, e);
+
+  const ch = k === 'Enter' ? '\n' : k === 'Tab' ? '\t' : k.length === 1 ? k : null;
+  const dead = k === 'Dead';
+  if (ch === null && !dead) return;
+  e.preventDefault();
+  if (!startAt) { startAt = performance.now(); timer = setInterval(renderStats, 500); }
+  const idx = caret, exp = seq[idx];
+  const modFired = e.ctrlKey || e.altKey || dead;
+  const label = dead ? 'alt+key' : modFired ? (e.ctrlKey ? 'ctrl+' : 'alt+') + charName(ch) : charName(ch);
+
+  // A key that fired a shortcut types nothing, but it still counts as a miss.
+  if (modFired) {
+    flash = label;
+    if (exp && !scored.has(idx)) { scored.add(idx); slips.add(idx); record(exp.ch, label, false); persist(); }
+    paintTop(true); renderEcho();
+    if (exp) showMiss(exp.ch, ch, label, e);
+    renderStats();
+    return;
+  }
+
+  flash = null;
+  typed.splice(caret, 0, ch); caret++;
+  const ok = !!exp && ch === exp.ch;
+  if (exp && !scored.has(idx)) {
+    scored.add(idx);
+    if (ok) record(exp.ch, '', true); else { slips.add(idx); record(exp.ch, label, false); persist(); }
+  }
+  paintTop(!ok); renderEcho();
+  if (typed.length === seq.length && mistakes() === 0) return finish();
+  if (ok) showNext();
+  else if (exp) showMiss(exp.ch, ch, label, e);
+  else {
+    clearKB(); fbEl.className = 'fb miss';
+    fbEl.innerHTML = '<div class="hint">Extra character: the snippet is already complete here.</div>' + fixNote();
+  }
   renderStats();
 }
 function liveNumbers() {
   const t = ((endAt || performance.now()) - (startAt || performance.now())) / 60000;
-  const wpm = t > 0 ? Math.round(pos / 5 / t) : 0;
-  const acc = pos + slips.size > 0 ? Math.round(100 * (Math.max(pos, 1) - [...slips].filter(p => p < Math.max(pos, 1)).length) / Math.max(pos, 1)) : 100;
+  const wpm = t > 0 ? Math.round(correctCount() / 5 / t) : 0;
+  const acc = scored.size ? Math.round(100 * (scored.size - slips.size) / scored.size) : 100;
   return { wpm, acc };
 }
 function renderStats() {
   const { wpm, acc } = liveNumbers();
   $('s-wpm').textContent = wpm;
   $('s-acc').textContent = acc + '%';
-  $('s-prog').textContent = (seq.length ? Math.round(100 * pos / seq.length) : 0) + '%';
+  $('s-prog').textContent = (seq.length ? Math.round(100 * correctCount() / seq.length) : 0) + '%';
   const rec = cur && save.lessons[cur.id];
   $('s-best').textContent = rec ? rec.best : '–';
 }
