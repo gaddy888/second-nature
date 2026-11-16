@@ -60,6 +60,22 @@
   .ch.cur.err { background: var(--bad); color: #fff; }
   .ch.ret { color: var(--faint); margin-left: 4px; }
   .ch.ret.done { color: var(--faint); opacity: .4; }
+  .echo { margin-top: 10px; display: flex; align-items: baseline; gap: 12px;
+    background: #0d1015; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 20px; font: 16px/1.6 var(--mono); min-height: 48px; }
+  .echo.miss { border-color: var(--bad); }
+  .echo-lbl { flex: none; font: 11px system-ui, sans-serif; color: var(--faint);
+    text-transform: uppercase; letter-spacing: .8px; width: 74px; white-space: nowrap; }
+  .echo-txt { white-space: pre-wrap; word-break: break-all; }
+  .echo-txt .t { color: var(--text); }
+  .echo-txt .w { color: #fff; background: var(--bad-bg); border-bottom: 2px solid var(--bad);
+    border-radius: 3px; padding: 0 2px; margin-left: 1px; }
+  .echo-txt .w.long { font-size: 12px; padding: 1px 5px; vertical-align: 2px; }
+  .echo-txt .caret { display: inline-block; width: 2px; height: 1.1em; background: var(--accent);
+    vertical-align: -3px; margin-left: 1px; animation: blink 1s steps(1) infinite; }
+  .echo.miss .caret { background: var(--bad); }
+  .echo-txt .hint { color: var(--faint); font-family: system-ui, sans-serif; font-size: 13px; }
+  @keyframes blink { 50% { opacity: 0; } }
   .fb { margin-top: 12px; min-height: 86px; border-radius: 10px; padding: 12px 16px;
     background: var(--panel); border: 1px solid var(--line); }
   .fb.miss { border-color: var(--bad); background: #23181b; }
@@ -152,6 +168,7 @@
       </div>
       <p class="note" id="note"></p>
       <div class="code" id="code"></div>
+      <div class="echo" id="echo"><span class="echo-lbl">you typed</span><span class="echo-txt" id="echo-txt"></span></div>
       <div class="fb" id="fb"></div>
       <div class="kb-wrap"><div class="kb" id="kb"></div></div>
       <div class="legend">
@@ -398,10 +415,28 @@ TRACKS.forEach(tr => tr.lessons.forEach((ls, i) => {
   ls.id = tr.id + '-' + i; ls.track = tr; ALL.push(ls);
 }));
 let cur = null, seq = [], pos = 0, startAt = 0, endAt = 0, slips = new Set(), finished = false, timer = null;
+let wrongs = [];                 // keys hit at this position since the last correct one
+
+// The line you are typing, echoed back with every wrong key shown where it landed.
+function renderEcho() {
+  let from = pos;
+  while (from > 0 && seq[from - 1].ch !== '\n') from--;
+  const typed = seq.slice(from, pos).map(s => s.ch).join('');
+  const html = [];
+  if (typed) html.push(`<span class="t">${esc(typed)}</span>`);
+  wrongs.slice(-6).forEach(w => {
+    const long = [...w].length > 1;
+    html.push(`<span class="w${long ? ' long' : ''}">${esc(w === ' ' ? '␣' : w)}</span>`);
+  });
+  html.push('<span class="caret"></span>');
+  if (!typed && !wrongs.length) html.push(' <span class="hint">start typing</span>');
+  $('echo-txt').innerHTML = html.join('');
+  $('echo').classList.toggle('miss', wrongs.length > 0);
+}
 
 const isNote = line => /^(#|--)(\s|$)/.test(line.trim());
 function loadLesson(lesson) {
-  cur = lesson; seq = []; pos = 0; startAt = 0; endAt = 0; slips = new Set(); finished = false;
+  cur = lesson; seq = []; pos = 0; startAt = 0; endAt = 0; slips = new Set(); finished = false; wrongs = [];
   clearInterval(timer);
   $('crumb').textContent = lesson.track ? lesson.track.name : 'Practice';
   $('title').textContent = lesson.t;
@@ -432,7 +467,7 @@ function loadLesson(lesson) {
     codeEl.appendChild(div);
   });
   if (lesson.track) { save.last = lesson.id; persist(); }
-  markCursor(); showNext(); renderStats(); renderNav();
+  markCursor(); showNext(); renderStats(); renderNav(); renderEcho();
 }
 function markCursor() {
   if (seq[pos]) {
@@ -508,7 +543,8 @@ function onKey(e) {
     exp.el.classList.remove('cur', 'err');
     exp.el.classList.add('done');
     if (slips.has(pos)) exp.el.classList.add('slip');
-    pos++;
+    pos++; wrongs = [];
+    renderEcho();
     if (pos >= seq.length) return finish();
     markCursor(); showNext(); renderStats();
     return;
@@ -516,6 +552,7 @@ function onKey(e) {
   const label = named ? NAMED_LABEL[k] : dead ? 'alt+key' : modFired ? (e.ctrlKey ? 'ctrl+' : 'alt+') + charName(ch) : charName(ch);
   if (!slips.has(pos)) { slips.add(pos); record(exp.ch, label, false); persist(); }
   exp.el.classList.add('err');
+  wrongs.push(label); renderEcho();
   showMiss(exp.ch, ch, label, e);
   renderStats();
 }
